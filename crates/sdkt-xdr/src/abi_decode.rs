@@ -50,23 +50,27 @@ pub fn decode_with_abi(
 
     // Try to match against custom types (UDTs)
     if let Some(fields) = extract_scval_fields(val, spec) {
-        for custom_type in &spec.custom_types {
-            if matches_custom_type(&fields, custom_type) {
-                return AbiDecodedValue {
-                    raw: raw.clone(),
-                    label: format!(
-                        "{} {{ {} }}",
-                        custom_type.name,
-                        fields
-                            .iter()
-                            .map(|(k, v)| format!("{}: {}", k, v))
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    ),
-                    matched_type: Some(format!("udt:{}", custom_type.name)),
-                    fields: Some(fields),
-                };
-            }
+        let matches = spec
+            .custom_types
+            .iter()
+            .filter(|custom_type| matches_custom_type(val, &fields, custom_type))
+            .collect::<Vec<_>>();
+        if matches.len() == 1 {
+            let custom_type = matches[0];
+            return AbiDecodedValue {
+                raw: raw.clone(),
+                label: format!(
+                    "{} {{ {} }}",
+                    custom_type.name,
+                    fields
+                        .iter()
+                        .map(|(k, v)| format!("{}: {}", k, v))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+                matched_type: Some(format!("udt:{}", custom_type.name)),
+                fields: Some(fields),
+            };
         }
     }
 
@@ -82,8 +86,22 @@ pub fn decode_with_abi(
 /// Match a decoded struct-like value to a UDT by its field names and arity.
 /// Declaration order is intentionally irrelevant; a value with the same shape
 /// but different names must not inherit an arbitrary UDT label.
-fn matches_custom_type(fields: &[(String, String)], custom_type: &ContractType) -> bool {
-    if custom_type.members.is_empty() || fields.len() != custom_type.members.len() {
+fn matches_custom_type(
+    val: &ScVal,
+    fields: &[(String, String)],
+    custom_type: &ContractType,
+) -> bool {
+    let ScVal::Map(Some(entries)) = val else {
+        return false;
+    };
+    if custom_type.kind != "struct"
+        || custom_type.members.is_empty()
+        || fields.len() != custom_type.members.len()
+        || entries
+            .0
+            .iter()
+            .any(|entry| !matches!(entry.key, ScVal::Symbol(_)))
+    {
         return false;
     }
 
@@ -358,6 +376,71 @@ mod tests {
                     val: ScVal::U64(200),
                 },
             ])
+            .unwrap(),
+        )));
+        assert!(decode_with_abi(&spec, &val, None).matched_type.is_none());
+    }
+
+    #[test]
+    fn same_shape_structs_are_not_selected_by_declaration_order() {
+        let mut spec = dummy_spec();
+        let members = vec![
+            TypeMember {
+                name: "x".into(),
+                doc: String::new(),
+            },
+            TypeMember {
+                name: "y".into(),
+                doc: String::new(),
+            },
+        ];
+        spec.custom_types = vec![
+            ContractType {
+                name: "First".into(),
+                kind: "struct".into(),
+                doc: String::new(),
+                members: members.clone(),
+            },
+            ContractType {
+                name: "Second".into(),
+                kind: "struct".into(),
+                doc: String::new(),
+                members,
+            },
+        ];
+        let val = ScVal::Map(Some(ScMap(
+            VecM::try_from(vec![
+                ScMapEntry {
+                    key: ScVal::Symbol(ScSymbol("x".try_into().unwrap())),
+                    val: ScVal::U64(1),
+                },
+                ScMapEntry {
+                    key: ScVal::Symbol(ScSymbol("y".try_into().unwrap())),
+                    val: ScVal::U64(2),
+                },
+            ])
+            .unwrap(),
+        )));
+        assert!(decode_with_abi(&spec, &val, None).matched_type.is_none());
+    }
+
+    #[test]
+    fn enum_shape_does_not_receive_map_derived_label() {
+        let mut spec = dummy_spec();
+        spec.custom_types.push(ContractType {
+            name: "PointLikeEnum".into(),
+            kind: "enum".into(),
+            doc: String::new(),
+            members: vec![TypeMember {
+                name: "x".into(),
+                doc: String::new(),
+            }],
+        });
+        let val = ScVal::Map(Some(ScMap(
+            VecM::try_from(vec![ScMapEntry {
+                key: ScVal::Symbol(ScSymbol("x".try_into().unwrap())),
+                val: ScVal::U64(1),
+            }])
             .unwrap(),
         )));
         assert!(decode_with_abi(&spec, &val, None).matched_type.is_none());
